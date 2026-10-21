@@ -66,6 +66,7 @@ public sealed class VerifyCommands : IVerifyCommands
         public int Type { get; set; }
         public bool IsPlaceholder { get; set; }
         public bool HasText { get; set; }
+        public string Text { get; set; } = string.Empty;
         public List<double> FontSizes { get; } = [];
         public (byte R, byte G, byte B)? TextColor { get; set; }
         public (byte R, byte G, byte B)? FillColor { get; set; }
@@ -146,6 +147,7 @@ public sealed class VerifyCommands : IVerifyCommands
             if ((int)shape.HasTextFrame == MsoTrue && (int)shape.TextFrame.HasText == MsoTrue)
             {
                 info.HasText = true;
+                try { info.Text = shape.TextFrame.TextRange.Text ?? string.Empty; } catch { }
                 var tr = shape.TextFrame.TextRange;
                 int pc = tr.Paragraphs().Count;
                 for (int p = 1; p <= pc; p++)
@@ -273,6 +275,24 @@ public sealed class VerifyCommands : IVerifyCommands
                     Add(issues, "tight-margin", "warning", slideIndex, e.Index,
                         $"{e.Name} text sits too close to a slide edge",
                         $"move inward (>= {marginPt:0.#}pt left/right, >= {half:0.#}pt top/bottom)");
+                }
+            }
+
+            // overflow risk (heuristic): estimated wrapped lines vs box height
+            if (e.HasText && e.Text.Trim().Length > 0 && e.FontSizes.Count > 0 && e.Width > 10 && e.Height > 5 && e.Rotation == 0)
+            {
+                double maxSize = e.FontSizes.Max();
+                // average glyph width ~0.52em for Calibri-class sans; 1.28em line height
+                double charsPerLine = Math.Max(1, e.Width / (maxSize * 0.52));
+                int longestWord = e.Text.Split(' ', '\n', '\r').Max(w => w.Length);
+                int lines = (int)Math.Ceiling(e.Text.Trim().Length / charsPerLine) + (longestWord > charsPerLine ? 1 : 0);
+                double needed = lines * maxSize * 1.28;
+                double available = e.Height + maxSize * 0.4; // allow one partial line of slack + box insets
+                if (needed > available * 1.15)
+                {
+                    Add(issues, "overflow-risk", "warning", slideIndex, e.Index,
+                        $"{e.Name}: ~{lines} wrapped line(s) of {maxSize:0.#}pt text need ~{needed:0}pt in a {e.Height:0}pt box",
+                        "shorten the text, lower the font size, or grow the shape");
                 }
             }
 
