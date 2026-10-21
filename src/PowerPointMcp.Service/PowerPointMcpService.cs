@@ -6,6 +6,7 @@ using Sbroenne.PowerPointMcp.ComInterop.Session;
 using Sbroenne.PowerPointMcp.Core.Accessibility;
 using Sbroenne.PowerPointMcp.Core.Verify;
 using Sbroenne.PowerPointMcp.Core.Design;
+using Sbroenne.PowerPointMcp.Core.Template;
 using Sbroenne.PowerPointMcp.Core.Animation;
 using Sbroenne.PowerPointMcp.Core.Chart;
 using Sbroenne.PowerPointMcp.Core.CustomShow;
@@ -72,6 +73,7 @@ public sealed class PowerPointMcpService : IDisposable
     private readonly CustomShowCommands _customShowCommands = new();
     private readonly VerifyCommands _verifyCommands = new();
     private readonly DesignCommands _designCommands = new();
+    private readonly TemplateCommands _templateCommands = new();
 
     /// <summary>Gets the UTC time this daemon instance started.</summary>
     public DateTime StartTime => _startTime;
@@ -310,6 +312,9 @@ public sealed class PowerPointMcpService : IDisposable
                 "design" => DispatchSimple<DesignAction>(action, request,
                     ServiceRegistry.Design.TryParseAction,
                     (a, batch) => ServiceRegistry.Design.DispatchToCore(_designCommands, a, batch, request.Args)),
+                "template" => DispatchSimple<TemplateAction>(action, request,
+                    ServiceRegistry.Template.TryParseAction,
+                    (a, batch) => ServiceRegistry.Template.DispatchToCore(_templateCommands, a, batch, request.Args)),
                 "customshow" => DispatchSimple<CustomShowAction>(action, request,
                     ServiceRegistry.CustomShow.TryParseAction,
                     (a, batch) => ServiceRegistry.CustomShow.DispatchToCore(_customShowCommands, a, batch, request.Args)),

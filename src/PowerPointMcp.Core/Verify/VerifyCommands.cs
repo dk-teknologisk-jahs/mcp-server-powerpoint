@@ -319,18 +319,27 @@ public sealed class VerifyCommands : IVerifyCommands
             }
         }
 
-        // title/body hierarchy
-        double titleMax = infos
-            .Where(s => s.HasText && s.Top < slideHeight * 0.4 && s.FontSizes.Count > 0)
-            .SelectMany(s => s.FontSizes).DefaultIfEmpty(0).Max();
-        double bodyMin = infos
-            .Where(s => s.HasText && s.FontSizes.Count > 0)
-            .SelectMany(s => s.FontSizes).DefaultIfEmpty(0).Min();
-        if (titleMax >= 24 && bodyMin > 0 && titleMax / bodyMin < MinTitleBodyRatio)
+        // title/body hierarchy — only when title and body live in distinct shapes.
+        // If every sized shape is a placeholder, the ratio is the template's own design choice
+        // (rulebook: match the template), so the warning is suppressed.
+        var titleShapes = infos
+            .Where(s => s.HasText && s.Top < slideHeight * 0.4 && s.FontSizes.Count > 0 && s.FontSizes.Max() >= 24)
+            .ToList();
+        var otherTextShapes = infos
+            .Where(s => s.HasText && s.FontSizes.Count > 0 && !titleShapes.Contains(s))
+            .ToList();
+        bool allTemplateBound = infos.Where(s => s.HasText && s.FontSizes.Count > 0).All(s => s.IsPlaceholder);
+        if (titleShapes.Count > 0 && otherTextShapes.Count > 0 && !allTemplateBound)
         {
-            Add(issues, "hierarchy", "warning", slideIndex, 0,
-                $"largest title {titleMax:0.#}pt vs body {bodyMin:0.#}pt (< {MinTitleBodyRatio}x)",
-                "titles 32-40pt bold; keep >= 1.75x body size contrast");
+            double titleMax = titleShapes.SelectMany(s => s.FontSizes).Max();
+            double bodyMin = otherTextShapes.SelectMany(s => s.FontSizes).Min();
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            if (bodyMin > 0 && titleMax / bodyMin < MinTitleBodyRatio)
+            {
+                Add(issues, "hierarchy", "warning", slideIndex, 0,
+                    $"largest title {titleMax.ToString("0.#", inv)}pt vs body {bodyMin.ToString("0.#", inv)}pt (< {MinTitleBodyRatio.ToString("0.##", inv)}x)",
+                    "titles 32-40pt bold; keep >= 1.75x body size contrast");
+            }
         }
     }
 

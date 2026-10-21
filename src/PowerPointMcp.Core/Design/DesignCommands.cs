@@ -69,13 +69,19 @@ public sealed class DesignCommands : IDesignCommands
             foreach (var s in spec.Slides!)
             {
                 ct.ThrowIfCancellationRequested();
-                var slide = ctx.Presentation.Slides.Add(ctx.Presentation.Slides.Count + 1, PowerPoint.PpSlideLayout.ppLayoutBlank);
-                BuildSlide(slide, s, w, palette, theme, warnings);
+                bool builtFromTemplate = TryBuildFromTemplate(ctx.Presentation, s, warnings);
+                if (!builtFromTemplate)
+                {
+                    var slide = ctx.Presentation.Slides.Add(ctx.Presentation.Slides.Count + 1, PowerPoint.PpSlideLayout.ppLayoutBlank);
+                    BuildSlide(slide, s, w, palette, theme, warnings);
+                }
+
+                var newSlide = ctx.Presentation.Slides[ctx.Presentation.Slides.Count];
                 if (!string.IsNullOrWhiteSpace(s.Notes))
                 {
                     try
                     {
-                        slide.NotesPage.Shapes.Placeholders[2].TextFrame.TextRange.Text = s.Notes;
+                        newSlide.NotesPage.Shapes.Placeholders[2].TextFrame.TextRange.Text = s.Notes;
                     }
                     catch
                     {
@@ -101,6 +107,190 @@ public sealed class DesignCommands : IDesignCommands
     private static Palette BuildPalette(ThemeSpec theme)
     {
         return new(HexToOle(theme.Banner, "1E2761"), HexToOle(theme.Accent, "028090"), HexToOle(theme.Ink, "212121"), HexToOle(theme.Muted, "6B7280"));
+    }
+
+    private static bool TryBuildFromTemplate(PowerPoint.Presentation presentation, SlideSpec s, List<string> warnings)
+    {
+        if (s.LayoutName == null && s.LayoutIndex == null && s.Placeholders == null)
+        {
+            return false;
+        }
+
+        dynamic? layout = ResolveLayout(presentation, s);
+        if (layout == null)
+        {
+            if (s.LayoutName != null || s.LayoutIndex != null)
+            {
+                warnings.Add($"layout not found (name='{s.LayoutName}' index={s.LayoutIndex}); slide '{s.Title}' built as manual archetype instead");
+            }
+
+            return false;
+        }
+
+        // Assigning CustomLayout to a fresh blank slide materializes the layout's linked placeholders.
+        PowerPoint.Slide slide = presentation.Slides.Add(presentation.Slides.Count + 1, PowerPoint.PpSlideLayout.ppLayoutBlank);
+        ((dynamic)slide).CustomLayout = layout;
+        var filled = new HashSet<int>();
+
+        if (s.Placeholders is { Count: > 0 })
+        {
+            foreach (var ph in s.Placeholders)
+            {
+                dynamic? target = FindPlaceholder(slide, ph);
+                if (target == null)
+                {
+                    warnings.Add($"placeholder not found (ordinal={ph.Ordinal} name='{ph.Name}') on slide '{s.Title}'");
+                    continue;
+                }
+
+                target.TextFrame.TextRange.Text = ph.Text ?? string.Empty;
+                filled.Add((int)target.Id);
+            }
+        }
+        else
+        {
+            dynamic? titleShape = FindPlaceholderByTypes(slide, [1, 3, 5]);
+            if (titleShape != null && !string.IsNullOrWhiteSpace(s.Title))
+            {
+                titleShape.TextFrame.TextRange.Text = s.Title;
+                filled.Add((int)titleShape.Id);
+            }
+
+            dynamic? bodyShape = FindPlaceholderByTypes(slide, [2, 4, 6, 7, 12]);
+            if (bodyShape != null && !string.IsNullOrWhiteSpace(s.Body))
+            {
+                bodyShape.TextFrame.TextRange.Text = s.Body;
+                filled.Add((int)bodyShape.Id);
+            }
+            else if (!string.IsNullOrWhiteSpace(s.Body))
+            {
+                warnings.Add($"no body placeholder on layout for slide '{s.Title}'; body dropped (use explicit placeholders[])");
+            }
+        }
+
+        // opt-in hygiene: deleting siblings is dangerous on multi-slot layouts
+        if (s.DeleteUnusedPlaceholders == true)
+        {
+            DeleteEmptyTextPlaceholders(slide, filled);
+        }
+
+        return true;
+    }
+
+    private static dynamic? ResolveLayout(PowerPoint.Presentation presentation, SlideSpec s)
+    {
+        try
+        {
+            dynamic master = ((dynamic)presentation).SlideMaster;
+            dynamic layouts = master.CustomLayouts;
+            int count = (int)layouts.Count;
+            if (s.LayoutIndex is int li && li >= 1 && li <= count)
+            {
+                return layouts[li];
+            }
+
+            if (s.LayoutName is string ln)
+            {
+                for (int i = 1; i <= count; i++)
+                {
+                    if (string.Equals((string)layouts[i].Name, ln, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return layouts[i];
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // master unreadable
+        }
+
+        return null;
+    }
+
+    private static dynamic? FindPlaceholder(PowerPoint.Slide slide, PlaceholderSpec ph)
+    {
+        try
+        {
+            dynamic placeholders = ((dynamic)slide).Shapes.Placeholders;
+            int count = (int)placeholders.Count;
+            if (ph.Ordinal is int ord && ord >= 1 && ord <= count)
+            {
+                return placeholders[ord];
+            }
+
+            if (ph.Name is string name)
+            {
+                for (int i = 1; i <= count; i++)
+                {
+                    if (string.Equals((string)placeholders[i].Name, name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return placeholders[i];
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // no placeholders
+        }
+
+        return null;
+    }
+
+    private static dynamic? FindPlaceholderByTypes(PowerPoint.Slide slide, int[] types)
+    {
+        foreach (dynamic shape in ((dynamic)slide).Shapes)
+        {
+            try
+            {
+                int t = (int)shape.PlaceholderFormat.Type;
+                if (types.Contains(t))
+                {
+                    return shape;
+                }
+            }
+            catch
+            {
+                // not a placeholder
+            }
+        }
+
+        return null;
+    }
+
+    private static void DeleteEmptyTextPlaceholders(PowerPoint.Slide slide, HashSet<int> filled)
+    {
+        var toDelete = new List<dynamic>();
+        foreach (dynamic shape in ((dynamic)slide).Shapes)
+        {
+            try
+            {
+                int t = (int)shape.PlaceholderFormat.Type;
+                bool isTextKind = t is 1 or 2 or 3 or 4 or 5 or 6 or 12;
+                bool empty = !((int)shape.HasTextFrame == -1 && (int)shape.TextFrame.HasText == -1);
+                if (isTextKind && empty && !filled.Contains((int)shape.Id))
+                {
+                    toDelete.Add(shape);
+                }
+            }
+            catch
+            {
+                // not a placeholder
+            }
+        }
+
+        foreach (dynamic shape in toDelete)
+        {
+            try
+            {
+                shape.Delete();
+            }
+            catch
+            {
+                // undeletable
+            }
+        }
     }
 
     private static void BuildSlide(
@@ -350,6 +540,30 @@ public sealed class DesignCommands : IDesignCommands
         public StatSpec? Stat { get; init; }
         public List<string>? Images { get; init; }
         public string? Notes { get; init; }
+
+        /// <summary>Template-aware mode: build this slide from the slide master's custom layout with this name.</summary>
+        public string? LayoutName { get; init; }
+
+        /// <summary>Template-aware mode: build from the master's custom layout with this 1-based index (wins over LayoutName).</summary>
+        public int? LayoutIndex { get; init; }
+
+        /// <summary>Explicit placeholder fills (matched by index or name). When omitted, Title/Body map to the title/body placeholders.</summary>
+        public List<PlaceholderSpec>? Placeholders { get; init; }
+
+        /// <summary>Delete empty text placeholders after filling. Default false (opt-in; risky on multi-slot layouts).</summary>
+        public bool? DeleteUnusedPlaceholders { get; init; }
+    }
+
+    private sealed record PlaceholderSpec
+    {
+        /// <summary>1-based position in the slide's placeholder collection (from template survey ordinal).</summary>
+        public int? Ordinal { get; init; }
+
+        /// <summary>Shape name to match (case-insensitive), used when Ordinal is null.</summary>
+        public string? Name { get; init; }
+
+        /// <summary>Text to write.</summary>
+        public string? Text { get; init; }
     }
 
     private sealed record CardSpec
